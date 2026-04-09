@@ -1,0 +1,9 @@
+renv/library/
+renv/local/
+renv/cellar/
+renv/staging/
+data/
+output/
+.git/
+.Rproj.user/
+*.Rproj

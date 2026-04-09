@@ -9,6 +9,9 @@ RUN apt-get update && apt-get install -y \
     libxml2-dev \
     libcurl4-openssl-dev \
     libssl-dev \
+    libwebp-dev \
+    libnode-dev \
+    cmake \
     pandoc \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
