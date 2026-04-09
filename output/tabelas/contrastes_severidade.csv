@@ -1,0 +1,19 @@
+contrast,tempo_dias,odds.ratio,SE,df,null,z.ratio,p.value
+controle / dose_baixa,30,1.900480586577665,NA,Inf,1,NA,NA
+controle / dose_media,30,3.625439089842601,NA,Inf,1,NA,NA
+controle / dose_alta,30,8.043890768139104,NA,Inf,1,NA,NA
+dose_baixa / dose_media,30,1.9076433168787035,NA,Inf,1,NA,NA
+dose_baixa / dose_alta,30,4.232556136037321,NA,Inf,1,NA,NA
+dose_media / dose_alta,30,2.218735598310198,NA,Inf,1,NA,NA
+controle / dose_baixa,60,1.482566558356541,NA,Inf,1,NA,NA
+controle / dose_media,60,2.8001318932319315,NA,Inf,1,NA,NA
+controle / dose_alta,60,7.230885958017047,NA,Inf,1,NA,NA
+dose_baixa / dose_media,60,1.8887056890963074,NA,Inf,1,NA,NA
+dose_baixa / dose_alta,60,4.877275773731636,NA,Inf,1,NA,NA
+dose_media / dose_alta,60,2.5823376304146546,NA,Inf,1,NA,NA
+controle / dose_baixa,90,1.8172749274852154,NA,Inf,1,NA,NA
+controle / dose_media,90,3.216513650886551,NA,Inf,1,NA,NA
+controle / dose_alta,90,6.196451159694576,NA,Inf,1,NA,NA
+dose_baixa / dose_media,90,1.7699653487970763,NA,Inf,1,NA,NA
+dose_baixa / dose_alta,90,3.4097488860804126,NA,Inf,1,NA,NA
+dose_media / dose_alta,90,1.9264495140527949,NA,Inf,1,NA,NA

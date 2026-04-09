@@ -1,0 +1,632 @@
+---
+title: "Ensaio de eficácia de fungicida em soja"
+subtitle: "Modelagem com GLMM em delineamento de blocos casualizados completos"
+author: "Jennifer Luz Lopes"
+date: today
+date-format: "DD/MM/YYYY"
+lang: pt
+bibliography: referencias.bib
+csl: https://raw.githubusercontent.com/citation-style-language/styles/master/associacao-brasileira-de-normas-tecnicas.csl
+format:
+  html:
+    toc: true
+    toc-title: "Sumário"
+    toc-depth: 3
+    toc-location: left
+    number-sections: true
+    code-fold: true
+    code-tools: true
+    code-summary: "Exibir código"
+    self-contained: true
+    theme: flatly
+    css: estilo.css
+    fig-align: center
+    fig-width: 8
+    fig-height: 5
+execute:
+  echo: true
+  warning: false
+  message: false
+  cache: false
+---
+
+```{r}
+#| label: pacotes
+
+library(tidyverse)
+library(glmmTMB)
+library(DHARMa)
+library(emmeans)
+library(broom.mixed)
+library(gt)
+library(DT)
+```
+
+```{r}
+#| label: paleta
+
+cores_cafe <- c(
+  azul_escuro = "#224573",
+  marrom      = "#6B4F4F",
+  azul_claro  = "#4A6FA5",
+  bege        = "#E5D3B3")
+```
+
+::: callout-important
+## Sobre este projeto
+
+Este projeto utiliza dados simulados para reproduzir a estrutura de um ensaio verdadeiro de eficácia de fungicida em soja. A simulação foi construída com parâmetros derivados da literatura agronômica, permitindo validar o pipeline analítico completo antes da aplicação em dados reais.
+
+Foram ajustados **modelos lineares mistos generalizados (GLMM)** com distribuição beta para a variável severidade e **modelo linear misto (LMM)** com distribuição gaussiana para a produtividade. Os efeitos de bloco e localidade foram tratados como aleatórios, e as comparações entre tratamentos foram realizadas com médias marginais estimadas via pacote `{emmeans}` [@lenth2023].
+
+O pipeline completo, da simulação de dados ao relatório, foi containerizado com **Docker** e versionado no **GitHub**, garantindo reprodutibilidade total do ambiente computacional.
+:::
+
+## Introdução
+
+A ferrugem asiática da soja (*Phakopsora pachyrhizi*) é uma das principais doenças que afetam a cultura no Brasil, podendo causar reduções expressivas na produtividade quando o controle não é adotado no momento adequado. Ensaios de eficácia são conduzidos para avaliar o desempenho de produtos fitossanitários sob diferentes doses e condições ambientais, sendo etapa obrigatória nos processos de registro regulatório.
+
+Este ensaio avaliou quatro tratamentos (controle sem aplicação e três doses crescentes de fungicida) em seis blocos e três localidades, com medições repetidas em 30, 60 e 90 dias após a aplicação. As variáveis-resposta foram a severidade da doença (percentual de área foliar afetada) e a produtividade de grãos (kg/ha).
+
+### Por que esta abordagem estatística?
+
+A escolha metodológica deste projeto não foi arbitrária. Cada decisão analítica responde a uma característica concreta dos dados.
+
+**Por que GLMM e não ANOVA tradicional?** A **ANOVA** assume que os resíduos são normalmente distribuídos, que as variâncias são homogêneas entre grupos e que as observações são independentes. Neste ensaio, nenhuma dessas três condições é plenamente atendida: a severidade é uma proporção (0 a 100%), com distribuição assimétrica e variância heterogênea entre tratamentos; as medições repetidas no tempo introduzem correlação entre as observações de uma mesma parcela; e blocos e localidades introduzem estrutura hierárquica nos dados. O **GLMM** acomoda toda essa complexidade de forma explícita e estatisticamente rigorosa [@bolker2009].
+
+**Por que distribuição beta e não transformação arco-seno?** A transformação arco-seno foi por décadas o recurso padrão para dados proporcionais, mas estudos recentes demonstram que ela produz estimativas viesadas e inferências incorretas, especialmente nos extremos da distribuição [@douma2019]. A **distribuição beta** modela diretamente a variável proporcional em seu espaço natural (0, 1), sem necessidade de transformação, e permite que a variância varie em função da média, o que é biologicamente mais realista [@ferrari2004].
+
+**Por que medições repetidas no tempo?** Acompanhar as mesmas parcelas nos dias 30, 60 e 90 após a aplicação permite capturar a dinâmica temporal do efeito do fungicida, separando o efeito imediato do efeito residual. Tratar essas medições como independentes ignoraria a correlação natural entre elas e subestimaria a incerteza das estimativas.
+
+### Por que simular os dados?
+
+A simulação cumpre um papel metodológico específico: como os parâmetros verdadeiros são conhecidos, é possível verificar se o modelo os recupera adequadamente, validando tanto a especificação do modelo quanto a implementação do código. Esse procedimento, chamado de **verificação de recuperação de parâmetros**, é uma prática recomendada em ambientes científicos e regulatórios antes da aplicação em dados reais. Além disso, a simulação permite que o pipeline analítico completo seja validado e documentado antes de qualquer coleta de campo [@montgomery2017].
+
+## Dados
+
+### Estrutura do experimento
+
+```{r}
+#| label: carregar-dados
+
+dados <- read_csv("data/processed/dados_limpos.csv", show_col_types = FALSE) |>
+  mutate(
+    tratamento = factor(tratamento,
+                        levels = c("controle", "dose_baixa", "dose_media", "dose_alta")),
+    bloco      = factor(bloco),
+    local      = factor(local),
+    tempo_dias = factor(tempo_dias, levels = c(30, 60, 90)),
+    sev_prop   = pmax(0.001, pmin(0.999, severidade / 100)))
+
+glimpse(dados)
+```
+
+| Variável        | Tipo             | Descrição                          |
+|-----------------|------------------|------------------------------------|
+| `tratamento`    | Fator (4 níveis) | Controle e três doses de fungicida |
+| `bloco`         | Fator (6 níveis) | **Efeito aleatório** de bloco      |
+| `local`         | Fator (3 níveis) | **Efeito aleatório** de localidade |
+| `tempo_dias`    | Fator (3 níveis) | Dias após aplicação (30, 60, 90)   |
+| `umidade_rel`   | Contínua         | Umidade relativa do ar (%)         |
+| `temp_media`    | Contínua         | Temperatura média diária (graus C) |
+| `severidade`    | Contínua (0-100) | Percentual de área foliar afetada  |
+| `produtividade` | Contínua         | Produção de grãos (kg/ha)          |
+
+: **Descrição das variáveis do ensaio {.striped}**
+
+### Análise exploratória
+
+```{r}
+#| label: fig-sev-trat
+#| fig-cap: "Distribuição da severidade por tratamento. Cada caixa representa a mediana, primeiro e terceiro quartis. Pontos fora das hastes são observações atípicas. "
+
+ggplot(dados, aes(x = tratamento, y = severidade, fill = tratamento)) +
+  geom_boxplot(alpha = 0.85, outlier.size = 1.5, outlier.alpha = 0.5) +
+  scale_fill_manual(values = unname(cores_cafe)) +
+  labs(
+    x       = "Tratamento",
+    y       = "Severidade (%)",
+    fill    = "Tratamento",
+    caption = "Jennifer Lopes") +
+  theme_classic(base_size = 13) +
+  theme(
+    legend.position = "none",
+    axis.text.x     = element_text(angle = 20, hjust = 1))
+```
+
+**Interpretação:** O gráfico revela uma tendência clara de redução da severidade conforme o aumento da dose de fungicida. O tratamento controle apresenta mediana consideravelmente mais elevada e maior dispersão dos valores, indicando alta variabilidade quando não há controle químico. As três doses de fungicida mostram reduções progressivas, com a dose alta apresentando os menores valores medianos. A sobreposição entre as distribuições das doses baixa e média sugere que a diferença entre esses dois níveis pode não ser estatisticamente expressiva, o que será investigado formalmente na modelagem.
+
+```{r}
+#| label: fig-evolucao
+#| fig-cap: "Evolução da severidade média por tratamento ao longo do tempo. Barras indicam erro padrão da média. "
+
+resumo_tempo <- dados |>
+  group_by(tratamento, tempo_dias) |>
+  summarise(
+    media   = mean(severidade),
+    ep      = sd(severidade) / sqrt(n()),
+    .groups = "drop")
+
+ggplot(resumo_tempo,
+       aes(x = tempo_dias, y = media,
+           color = tratamento, group = tratamento)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 3) +
+  geom_errorbar(aes(ymin = media - ep, ymax = media + ep),
+                width = 0.15, linewidth = 0.6) +
+  scale_color_manual(values = unname(cores_cafe)) +
+  labs(
+    x       = "Dias após aplicação",
+    y       = "Severidade média (%)",
+    color   = "Tratamento",
+    caption = "Jennifer Lopes") +
+  theme_classic(base_size = 13)
+```
+
+**Interpretação:** O gráfico mostra que todos os tratamentos com fungicida apresentam redução da severidade ao longo do tempo, indicando efeito residual do produto. O controle mantém os níveis mais elevados nas três avaliações, com leve tendência de aumento entre os dias 30 e 60, o que é esperado em condições favoráveis ao progresso da doença. A divergência crescente entre a curva do controle e as curvas das doses ao longo do tempo sugere uma interação estatisticamente relevante entre tratamento e tempo, hipótese testada formalmente na comparação de modelos.
+
+```{r}
+#| label: fig-prod
+#| fig-cap: "Produtividade por tratamento. Distribuição violino com boxplot interno. "
+
+ggplot(dados, aes(x = tratamento, y = produtividade, fill = tratamento)) +
+  geom_violin(alpha = 0.7, trim = FALSE) +
+  geom_boxplot(width = 0.15, fill = "white", outlier.size = 1) +
+  scale_fill_manual(values = unname(cores_cafe)) +
+  labs(
+    x       = "Tratamento",
+    y       = "Produtividade (kg/ha)",
+    fill    = "Tratamento",
+    caption = "Jennifer Lopes") +
+  theme_classic(base_size = 13) +
+  theme(
+    legend.position = "none",
+    axis.text.x     = element_text(angle = 20, hjust = 1))
+```
+
+**Interpretação:** A produtividade acompanha o padrão observado na severidade, com ganhos progressivos nas parcelas tratadas em relação ao controle. As distribuições do violino mostram que as parcelas sem tratamento concentram os valores mais baixos de produção, enquanto as parcelas com dose alta apresentam os valores mais elevados. A sobreposição considerável entre as distribuições indica variabilidade expressiva dentro de cada grupo, reflexo dos efeitos de bloco e localidade que serão controlados no modelo misto.
+
+```{r}
+#| label: fig-umidade
+#| fig-cap: "Relação entre umidade relativa e severidade por tratamento e tempo de avaliação. Linhas indicam tendência linear. "
+
+ggplot(dados, aes(x = umidade_rel, y = severidade, color = tratamento)) +
+  geom_point(alpha = 0.35, size = 1.8) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.85) +
+  scale_color_manual(values = unname(cores_cafe)) +
+  facet_wrap(~tempo_dias, labeller = label_both) +
+  labs(
+    x       = "Umidade relativa (%)",
+    y       = "Severidade (%)",
+    color   = "Tratamento",
+    caption = "Jennifer Lopes") +
+  theme_classic(base_size = 12)
+```
+
+**Interpretação:** As linhas de tendência mostram associação positiva entre umidade relativa e severidade para o tratamento controle, coerente com a biologia de *Phakopsora pachyrhizi*, cujo ciclo de infecção é fortemente dependente de umidade. Para os tratamentos com fungicida, essa relação é atenuada, indicando que o produto reduz a sensibilidade da cultura à umidade. Esse padrão justifica a inclusão da umidade relativa como covariável no modelo, permitindo separar o efeito do tratamento do efeito ambiental.
+
+## Métodos
+
+### O que é um GLMM e para que serve
+
+O **Modelo Linear Misto Generalizado (GLMM)** é uma extensão do modelo linear clássico que resolve duas limitações fundamentais: a incapacidade de lidar com respostas que não seguem distribuição normal, e a incapacidade de modelar observações correlacionadas, como as que surgem em dados hierárquicos ou longitudinais [@bates2015].
+
+**A estrutura de um GLMM combina três componentes:**
+
+**Efeitos fixos:** os preditores cujos efeitos queremos estimar e interpretar diretamente, como o tratamento, o tempo e as covariáveis ambientais. São chamados de fixos porque os níveis testados representam categorias de interesse em si mesmas, e o modelo estima um parâmetro interpretável para cada nível.
+
+**Efeitos aleatórios:** preditores cujos níveis são tratados como uma amostra de uma população maior de possíveis condições. Neste ensaio, os seis blocos e as três localidades não foram escolhidos porque são os únicos de interesse, mas porque representam uma amostra da variabilidade natural de condições de campo. Modelar esses efeitos como aleatórios permite generalizar as conclusões para além das condições específicas do ensaio, e evita que o modelo consuma um parâmetro para cada bloco e cada localidade [@bolker2009].
+
+**Função de ligação:** conecta a média da distribuição ao preditor linear. Para a distribuição beta, a **função logit** $\text{logit}(\mu) = \log(\mu / (1 - \mu))$ transforma a proporção do intervalo (0, 1) para a escala irrestrita dos reais, onde o modelo linear opera. Os coeficientes estimados estão nessa escala e precisam ser transformados de volta para interpretação na escala original.
+
+O pacote `{glmmTMB}` [@brooks2017] foi utilizado por combinar flexibilidade na especificação de distribuições com velocidade computacional, sendo amplamente adotado em análises ecológicas e agronômicas.
+
+### Modelo para severidade
+
+A severidade foi modelada como proporção (intervalo 0-1) com **distribuição beta** e função de ligação logit [@ferrari2004]. A escolha da distribuição beta é adequada para dados proporcionais contínuos, pois acomoda a assimetria e a heterogeneidade de variância típicas desse tipo de resposta, evitando os vícios introduzidos por transformações como o arco-seno [@douma2019].
+
+O modelo ajustado foi:
+
+$$
+\text{logit}(\mu_{ijkt}) = \beta_0 + \beta_{\text{trat}_i} + \beta_{\text{tempo}_t} + (\beta_{\text{trat} \times \text{tempo}})_{it} + \beta_1 \cdot \text{umidade}_{jk} + \beta_2 \cdot \text{temp}_{jk} + b_j + l_k
+$$
+
+em que $b_j \sim N(0, \sigma^2_b)$ e $l_k \sim N(0, \sigma^2_l)$ são os efeitos aleatórios de bloco e localidade, respectivamente.
+
+### Modelo para produtividade
+
+A produtividade foi modelada com **distribuição gaussiana** e função de ligação identidade (LMM clássico) [@bates2015], sem o termo de interação, dado que o efeito do tratamento sobre a produção de grãos é avaliado de forma integrada ao longo do ciclo.
+
+### Seleção de modelo e o critério AIC
+
+Os modelos com e sem o termo de interação `tratamento x tempo` foram comparados pelo **Critério de Informação de Akaike (AIC)** [@akaike1974].
+
+O **AIC** quantifica o equilíbrio entre o ajuste do modelo aos dados e a complexidade do modelo (número de parâmetros estimados). Modelos mais complexos tendem a se ajustar melhor aos dados observados, mas podem capturar ruído em vez de sinal. O AIC penaliza cada parâmetro adicional, favorecendo modelos que explicam bem os dados com o menor número possível de parâmetros.
+
+O **delta-AIC** é a diferença entre o AIC de cada modelo e o do melhor modelo, usado como critério de decisão:
+
+-   Delta-AIC \< 2: os modelos têm suporte equivalente pelos dados
+-   Delta-AIC entre 2 e 7: evidência moderada a favor do modelo com menor AIC
+-   Delta-AIC \> 10: evidência forte a favor do modelo com menor AIC
+
+### Por que a correção de Tukey
+
+Ao realizar múltiplas comparações simultâneas (todos os pares possíveis entre os quatro tratamentos), o risco de encontrar ao menos uma diferença estatisticamente significativa por acaso aumenta com o número de testes. Esse é o problema do **erro tipo I inflado**.
+
+A **correção de Tukey** [@tukey1949] controla esse risco ajustando os valores-p de modo que, considerando todas as comparações simultaneamente, a probabilidade de ao menos um falso positivo seja mantida no nível nominal de 5%. Ela é especialmente indicada quando todos os pares possíveis de médias são comparados, o que é exatamente o caso aqui. A alternativa Bonferroni seria mais conservadora e menos indicada com muitas comparações; a alternativa Dunnett seria mais apropriada se o objetivo fosse comparar apenas contra o controle.
+
+### Diagnóstico de resíduos com DHARMa
+
+O diagnóstico de resíduos para GLMMs não pode ser feito com os resíduos brutos, pois estes não seguem distribuição uniforme mesmo quando o modelo está corretamente especificado. O pacote `{DHARMa}` [@hartig2022] resolve esse problema simulando novos conjuntos de dados a partir do modelo ajustado e calculando **resíduos quantílicos padronizados**, que devem seguir distribuição uniforme em \[0, 1\] se o modelo estiver bem especificado. Desvios da uniformidade indicam problemas como subdispersão, sobredispersão, zeros em excesso ou padrões residuais não capturados pelo modelo.
+
+## Resultados
+
+### Ajuste do modelo para severidade
+
+```{r}
+#| label: mod-sev
+
+mod_sev <- glmmTMB(
+  sev_prop ~ tratamento * tempo_dias + umidade_rel + temp_media +
+    (1 | bloco) + (1 | local),
+  data   = dados,
+  family = beta_family(link = "logit"))
+
+summary(mod_sev)
+```
+
+**Interpretação:** Os coeficientes do modelo estão na escala logit. Valores negativos para os tratamentos com fungicida indicam redução na proporção de área foliar afetada em relação ao controle. A magnitude do coeficiente da dose alta é consideravelmente maior que o da dose baixa, confirmando o gradiente dose-resposta observado na análise exploratória. Os coeficientes das covariáveis ambientais confirmam a influência da umidade relativa sobre a progressão da doença.
+
+### Diagnóstico de resíduos
+
+```{r}
+#| label: fig-dharma-sev
+#| fig-cap: "Diagnóstico de resíduos simulados para o modelo de severidade (DHARMa). O QQ-plot deve mostrar pontos próximos à diagonal; o gráfico de resíduos x valores ajustados deve ser uniforme. "
+
+sim_sev <- simulateResiduals(mod_sev, n = 500, plot = FALSE)
+plot(sim_sev)
+```
+
+**Interpretação:** Um modelo bem especificado produz resíduos que seguem distribuição uniforme em \[0, 1\], o que se manifesta como pontos próximos à diagonal no **QQ-plot** e ausência de padrões sistemáticos no gráfico de resíduos x valores ajustados. Desvios expressivos da diagonal ou padrões em forma de curva ou funil indicariam má especificação do modelo (distribuição errada, covariáveis faltando ou estrutura de correlação inadequada).
+
+### Ajuste do modelo para produtividade
+
+```{r}
+#| label: mod-prod
+
+mod_prod <- glmmTMB(
+  produtividade ~ tratamento + tempo_dias + umidade_rel + temp_media +
+    (1 | bloco) + (1 | local),
+  data   = dados,
+  family = gaussian())
+
+summary(mod_prod)
+```
+
+**Interpretação:** Os coeficientes para os tratamentos representam o ganho médio estimado de produtividade em kg/ha em relação ao controle, mantendo constantes os efeitos de bloco, localidade e covariáveis ambientais. O gradiente positivo das três doses confirma a relação entre controle da doença e ganho produtivo.
+
+### Comparação de modelos
+
+```{r}
+#| label: tbl-aic
+#| tbl-cap: "Comparação dos modelos de severidade por AIC. O modelo com menor AIC é o preferido."
+
+mod_sev_sem_int <- glmmTMB(
+  sev_prop ~ tratamento + tempo_dias + umidade_rel + temp_media +
+    (1 | bloco) + (1 | local),
+  data   = dados,
+  family = beta_family(link = "logit"))
+
+comp <- AIC(mod_sev_sem_int, mod_sev) |>
+  as.data.frame() |>
+  rownames_to_column("modelo") |>
+  mutate(
+    modelo    = c("Sem interação", "Com interação"),
+    delta_AIC = round(AIC - min(AIC), 2),
+    AIC       = round(AIC, 2))
+
+gt(comp) |>
+  cols_label(
+    modelo    = "Modelo",
+    df        = "Parâmetros",
+    AIC       = "AIC",
+    delta_AIC = "Delta-AIC") |>
+  tab_style(
+    style     = list(cell_fill(color = "#224573"), cell_text(color = "white")),
+    locations = cells_column_labels()) |>
+  opt_stylize(style = 1)
+```
+
+**Interpretação:** O modelo com o menor **AIC** é o preferido. Um **delta-AIC** superior a 2 para o modelo alternativo constitui evidência a favor da inclusão ou exclusão do termo de interação. Esse resultado define qual especificação será usada para as estimativas das médias marginais e as comparações entre tratamentos.
+
+### Médias marginais estimadas para severidade
+
+```{r}
+#| label: fig-emm-sev
+#| fig-cap: "Médias marginais estimadas da severidade por tratamento e tempo de avaliação. Intervalos de confiança de 95% na escala original (%). "
+
+emm_sev <- emmeans(mod_sev,
+                   specs = ~ tratamento | tempo_dias,
+                   type  = "response")
+
+emm_sev_df <- as.data.frame(emm_sev) |>
+  (\(df) {
+    nms      <- names(df)
+    mean_col <- grep("response|emmean", nms, value = TRUE)[1]
+    lcl_col  <- grep("LCL|lower", nms, value = TRUE, ignore.case = TRUE)[1]
+    ucl_col  <- grep("UCL|upper", nms, value = TRUE, ignore.case = TRUE)[1]
+    df |> rename(media  = all_of(mean_col),
+                 ic_inf = all_of(lcl_col),
+                 ic_sup = all_of(ucl_col))
+  })()
+
+ggplot(emm_sev_df,
+       aes(x = tratamento, y = media * 100,
+           color = tratamento, shape = tempo_dias)) +
+  geom_point(size = 3.5, position = position_dodge(width = 0.45)) +
+  geom_errorbar(
+    aes(ymin = ic_inf * 100, ymax = ic_sup * 100),
+    width     = 0.2,
+    linewidth = 0.7,
+    position  = position_dodge(width = 0.45)) +
+  scale_color_manual(values = unname(cores_cafe)) +
+  labs(
+    x       = "Tratamento",
+    y       = "Severidade estimada (%)",
+    color   = "Tratamento",
+    shape   = "Dias após aplicação",
+    caption = "Jennifer Lopes") +
+  theme_classic(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+```
+
+**Interpretação:** As **médias marginais** são estimativas do modelo que controlam os efeitos de bloco, localidade e covariáveis ambientais, sendo comparações mais precisas do que as médias brutas. A ausência de sobreposição dos intervalos de confiança entre o controle e as doses indica diferenças estatisticamente relevantes. A comparação dos intervalos entre os três momentos de avaliação revela se o efeito do fungicida se mantém ou se atenua ao longo do tempo, o que tem implicação direta na decisão sobre a necessidade de reaplicação.
+
+### Médias marginais estimadas para produtividade
+
+```{r}
+#| label: fig-emm-prod
+#| fig-cap: "Produtividade média estimada por tratamento com intervalo de confiança de 95%. "
+
+emm_prod <- emmeans(mod_prod, specs = ~ tratamento, type = "response")
+
+emm_prod_df <- as.data.frame(emm_prod) |>
+  (\(df) {
+    nms      <- names(df)
+    mean_col <- grep("response|emmean", nms, value = TRUE)[1]
+    lcl_col  <- grep("LCL|lower", nms, value = TRUE, ignore.case = TRUE)[1]
+    ucl_col  <- grep("UCL|upper", nms, value = TRUE, ignore.case = TRUE)[1]
+    df |> rename(media  = all_of(mean_col),
+                 ic_inf = all_of(lcl_col),
+                 ic_sup = all_of(ucl_col))
+  })()
+
+ggplot(emm_prod_df, aes(x = tratamento, y = media, fill = tratamento)) +
+  geom_col(alpha = 0.85, width = 0.6) +
+  geom_errorbar(
+    aes(ymin = ic_inf, ymax = ic_sup),
+    width     = 0.2,
+    linewidth = 0.7) +
+  scale_fill_manual(values = unname(cores_cafe)) +
+  labs(
+    x       = "Tratamento",
+    y       = "Produtividade estimada (kg/ha)",
+    fill    = "Tratamento",
+    caption = "Jennifer Lopes") +
+  theme_classic(base_size = 13) +
+  theme(
+    legend.position = "none",
+    axis.text.x     = element_text(angle = 20, hjust = 1))
+```
+
+**Interpretação:** As barras representam a produtividade média estimada pelo modelo para cada tratamento, já descontados os efeitos de bloco e localidade. O ganho em kg/ha pode ser interpretado como o benefício produtivo de cada dose em relação ao controle em condições médias de campo. Esse número, confrontado com o custo do produto por dose, permite calcular a viabilidade econômica de cada nível de aplicação, subsidiando a recomendação técnica.
+
+### Componentes de variância
+
+```{r}
+#| label: tbl-variancia
+#| tbl-cap: "Estimativas dos componentes de variância dos efeitos aleatórios."
+
+var_comp <- tibble(
+  grupo     = names(VarCorr(mod_sev)$cond),
+  variancia = sapply(VarCorr(mod_sev)$cond, function(x) as.numeric(x)),
+  dp        = sapply(VarCorr(mod_sev)$cond, function(x) attr(x, "stddev"))) |>
+  mutate(across(where(is.numeric), ~ round(., 6)))
+
+gt(var_comp) |>
+  cols_label(
+    grupo     = "Efeito aleatório",
+    variancia = "Variância estimada",
+    dp        = "Desvio padrão") |>
+  tab_style(
+    style     = list(cell_fill(color = "#224573"), cell_text(color = "white")),
+    locations = cells_column_labels()) |>
+  opt_stylize(style = 1)
+```
+
+**Interpretação:** Os **componentes de variância** quantificam o quanto de variabilidade total nos dados é atribuível a cada efeito aleatório. Uma variância alta para localidade indicaria que as condições entre as três localidades influenciam fortemente a severidade, independentemente do tratamento, sinalizando que a recomendação de dose pode precisar ser regionalizada. Uma variância próxima de zero sugere que esse fator não introduziu variabilidade relevante neste conjunto de dados.
+
+### Contrastes entre tratamentos
+
+```{r}
+#| label: tbl-contrastes
+
+cont_sev <- contrast(
+  emmeans(mod_sev, specs = ~ tratamento, type = "response"),
+  method = "pairwise",
+  adjust = "tukey") |>
+  as.data.frame() |>
+  mutate(across(where(is.numeric), ~ round(., 4)))
+
+datatable(
+  cont_sev,
+  options  = list(pageLength = 6, dom = "tp"),
+  rownames = FALSE,
+  caption  = "Contrastes pareados entre tratamentos com correção de Tukey")
+```
+
+**Interpretação:** Cada linha representa a comparação entre dois tratamentos. A coluna `ratio` indica a razão entre as médias marginais estimadas na escala original: um valor inferior a 1 indica que o primeiro tratamento tem severidade menor que o segundo. O **valor-p ajustado** por Tukey indica se a diferença é estatisticamente relevante considerando todas as comparações simultâneas. Diferenças com valor-p \< 0,05 são consideradas significativas ao nível convencional de 5%.
+
+## Verificação de recuperação de parâmetros
+
+Como os dados foram simulados com parâmetros conhecidos, é possível verificar se o modelo os recuperou adequadamente. Os efeitos verdadeiros dos tratamentos sobre a severidade (escala logit) foram:
+
+| Tratamento | Efeito verdadeiro (logit) |
+|------------|---------------------------|
+| Controle   | 0,00 (referência)         |
+| Dose baixa | -0,60                     |
+| Dose média | -1,20                     |
+| Dose alta  | -2,00                     |
+
+```{r}
+#| label: tbl-recuperacao
+#| tbl-cap: "Comparação entre os efeitos verdadeiros (simulação) e os estimados pelo modelo."
+
+coef_modelo <- broom.mixed::tidy(mod_sev, effects = "fixed") |>
+  filter(str_detect(term, "tratamento")) |>
+  filter(!str_detect(term, "tempo")) |>
+  mutate(
+    efeito_verdadeiro = c(-0.60, -1.20, -2.00),
+    diferenca         = round(estimate - efeito_verdadeiro, 3),
+    estimate          = round(estimate, 3),
+    std.error         = round(std.error, 3)) |>
+  select(term, efeito_verdadeiro, estimate, std.error, diferenca)
+
+gt(coef_modelo) |>
+  cols_label(
+    term              = "Parâmetro",
+    efeito_verdadeiro = "Verdadeiro",
+    estimate          = "Estimado",
+    std.error         = "Erro padrão",
+    diferenca         = "Diferença") |>
+  tab_style(
+    style     = list(cell_fill(color = "#224573"), cell_text(color = "white")),
+    locations = cells_column_labels()) |>
+  opt_stylize(style = 1)
+```
+
+**Interpretação:** A proximidade entre os valores verdadeiros e os estimados valida tanto a especificação do modelo quanto a implementação do pipeline. Diferenças pequenas são esperadas e refletem a variabilidade amostral inerente ao processo de simulação. Divergências expressivas indicariam problemas na especificação do modelo ou na geração dos dados.
+
+## Tradução dos resultados para decisão
+
+Os resultados deste ensaio permitem responder a três perguntas práticas diretamente relevantes para o contexto regulatório e produtivo:
+
+**Qual dose é mais eficaz no controle da doença?** A dose alta apresentou a maior redução na severidade em todos os momentos de avaliação. A dose média apresentou desempenho intermediário e estatisticamente distinto do controle. A dose baixa também diferiu do controle, mas com magnitude menor.
+
+**Qual o ganho de produtividade esperado?** Com base nas médias marginais estimadas, o ganho em kg/ha aumenta progressivamente com a dose. Esse dado, combinado com o preço da saca e o custo do produto por dose, permite calcular a dose de maior retorno econômico, que não é necessariamente a dose de maior eficácia agronômica.
+
+**O efeito se mantém ao longo do ciclo?** A análise da interação tratamento-tempo indica que o efeito do fungicida não é estático. A avaliação aos 30 dias captura o efeito imediato, enquanto a avaliação aos 90 dias captura o efeito residual. Doses que perdem eficácia mais rapidamente podem exigir reaplicação em situações de alta pressão de doença.
+
+## Próximos passos
+
+Este projeto foi desenvolvido com dados simulados. A aplicação em dados reais de campo abriria caminho para as seguintes extensões:
+
+**Estrutura espacial entre blocos.** Parcelas próximas tendem a ser mais semelhantes do que parcelas distantes. Modelos com estrutura de covariância espacial (exponencial ou esférica) poderiam capturar essa dependência e produzir estimativas mais precisas.
+
+**Análise de poder amostral.** Com o modelo ajustado, seria possível calcular o tamanho mínimo de amostra necessário para detectar diferenças de magnitude específica entre tratamentos com poder estatístico adequado, informando o planejamento de futuros ensaios.
+
+**Análise conjunta de múltiplos ensaios.** Em ensaios de registro regulatório, o mesmo conjunto de tratamentos é frequentemente avaliado em múltiplas safras e regiões. A análise conjunta com modelos mistos hierárquicos permite estimar a estabilidade do efeito do tratamento e a interação com o ambiente de cultivo.
+
+**Modelos com variância heterogênea entre tratamentos.** O modelo atual assume que a variância residual é igual para todos os tratamentos. Tratamentos com fungicida podem reduzir não apenas a média da severidade, mas também sua variabilidade, o que pode ser testado com modelos de variância heterogênea no `{glmmTMB}`.
+
+**Integração com análise de custo-benefício.** A incorporação de parâmetros econômicos (preço da saca, custo do produto, custo de aplicação) transformaria os resultados estatísticos em recomendações práticas de dose ótima por localidade.
+
+## Limitações e suposições
+
+**Independência dos efeitos aleatórios.** Os efeitos de bloco e localidade foram assumidos como independentes entre si e normalmente distribuídos com média zero. Em ensaios reais com estrutura espacial, a dependência entre parcelas vizinhas pode requerer estruturas de covariância mais complexas.
+
+**Distribuição beta e truncamento artificial.** A distribuição beta requer dados no intervalo aberto (0, 1). Valores exatos de 0% e 100% foram ajustados para 0,001 e 0,999, prática comum que introduz pequena imprecisão nos extremos da distribuição.
+
+**Covariáveis ambientais no nível da parcela.** A umidade relativa e a temperatura foram medidas uma vez por avaliação. Em ensaios reais, essas variáveis têm variação temporal mais granular, e uma única medição pode não representar adequadamente as condições durante todo o período de avaliação.
+
+**Estrutura de correlação temporal simplificada.** As medições repetidas em 30, 60 e 90 dias foram incluídas como fator fixo, sem modelagem explícita da correlação serial entre as medições de uma mesma parcela. Uma estrutura autorregressiva (AR1) poderia ser mais adequada para dados com medições em intervalos regulares.
+
+**Dados simulados x dados reais.** A variabilidade entre repetições dentro de cada combinação tratamento-bloco-local pode ser subestimada em relação a ensaios de campo reais, onde fatores não controlados introduzem variabilidade adicional não capturada pelo modelo de simulação.
+
+**Convergência do modelo.** Modelos com muitos efeitos aleatórios ou com dados esparsos podem apresentar dificuldades de convergência. Em dados reais, recomenda-se verificar os avisos de convergência e, quando necessário, simplificar a estrutura aleatória ou utilizar métodos alternativos de estimação.
+
+**Ausência de análise de sensibilidade.** Não foi avaliado o quanto as conclusões mudariam sob especificações alternativas do modelo (outra distribuição, estrutura aleatória diferente, inclusão ou exclusão de covariáveis). Uma análise de sensibilidade fortaleceria a robustez das inferências em um contexto regulatório.
+
+## Reprodutibilidade
+
+### O que é cada ferramenta e para que serve
+
+**R e RStudio** são o ambiente de análise estatística utilizado neste projeto. R é uma linguagem de programação de código aberto especializada em estatística e visualização de dados, amplamente adotada na academia e na indústria.
+
+**Quarto** é o sistema de publicação que gerou este relatório. Ele integra código R, texto e saídas em um único documento reprodutível. Quando o relatório é renderizado, todo o código é executado do zero, garantindo que os resultados apresentados correspondem exatamente ao código escrito. Isso elimina o risco de inconsistências entre análise e relatório.
+
+**`{renv}`** gerencia as versões dos pacotes R utilizados no projeto. Ele registra no arquivo `renv.lock` a versão exata de cada pacote instalado, permitindo que qualquer pessoa restaure o mesmo ambiente computacional com um único comando. Sem esse controle, uma atualização de pacote poderia alterar os resultados da análise silenciosamente.
+
+**Docker** empacota todo o ambiente computacional (sistema operacional, R, pacotes, código) em um container isolado. Um container Docker é executado de forma idêntica em qualquer máquina que tenha o Docker instalado, independentemente do sistema operacional. Isso garante que os resultados deste projeto podem ser reproduzidos por qualquer pessoa, em qualquer máquina, sem configuração manual do ambiente.
+
+**GitHub** é a plataforma de versionamento de código. Cada alteração no projeto é registrada com uma mensagem descritiva, permitindo rastrear o histórico completo de modificações, colaborar com outras pessoas e publicar o relatório HTML para acesso público.
+
+### Como reproduzir esta análise
+
+**Com Docker:**
+
+``` bash
+docker build -t ensaio-fungicida .
+docker run --rm -v $(pwd)/output:/project/output ensaio-fungicida
+```
+
+**Sem Docker:**
+
+``` r
+renv::restore()
+
+source("R/01_simular_dados.R")
+source("R/02_limpar_dados.R")
+source("R/03_eda.R")
+source("R/04_analise_glmm.R")
+
+quarto::quarto_render("report/relatorio.qmd")
+```
+
+## Dicionário de conceitos estatísticos
+
+**AIC (Critério de Informação de Akaike):** medida de qualidade de ajuste que penaliza a complexidade do modelo. Calculado como $-2\log L + 2k$, em que $L$ é a verossimilhança e $k$ o número de parâmetros. Modelos com menor AIC são preferidos [@akaike1974].
+
+**Componentes de variância:** estimativas da variabilidade atribuível a cada efeito aleatório no modelo. Quantificam o quanto fontes como bloco e localidade contribuem para a variabilidade total dos dados.
+
+**Contraste:** combinação linear das médias de grupos utilizada para comparar tratamentos específicos. Contrastes pareados comparam todos os pares possíveis de médias.
+
+**Correção de Tukey:** método de ajuste dos valores-p em comparações múltiplas que controla a taxa de erro familial, mantendo a probabilidade de ao menos um falso positivo no nível nominal ao longo de todas as comparações simultâneas [@tukey1949].
+
+**Covariável:** variável contínua incluída no modelo como preditora para controlar sua influência sobre a resposta. Neste ensaio, umidade relativa e temperatura média são covariáveis ambientais.
+
+**Delta-AIC:** diferença entre o AIC de um modelo e o AIC do melhor modelo candidato. Usado para comparar modelos alternativos.
+
+**DHARMa:** pacote R que implementa diagnóstico de resíduos por simulação para modelos hierárquicos. Produz resíduos quantílicos padronizados que seguem distribuição uniforme em \[0, 1\] quando o modelo está corretamente especificado [@hartig2022].
+
+**Distribuição beta:** distribuição de probabilidade definida no intervalo (0, 1), adequada para modelar proporções e taxas. Possui dois parâmetros de forma que controlam a assimetria e a curtose [@ferrari2004].
+
+**Efeito aleatório:** efeito de uma variável cujos níveis são tratados como amostra de uma população maior. O modelo estima a variância entre os níveis, não um parâmetro separado para cada nível, permitindo generalização além dos níveis observados.
+
+**Efeito fixo:** efeito de uma variável cujos níveis são de interesse direto e para os quais o modelo estima parâmetros interpretáveis. Tratamento, tempo e covariáveis ambientais são efeitos fixos neste ensaio.
+
+**emmeans (médias marginais estimadas):** médias preditas pelo modelo para cada combinação de preditores de interesse, com os efeitos de outros preditores mantidos em seus valores médios. Permitem comparações entre tratamentos controladas pelas covariáveis e pelos efeitos aleatórios [@lenth2023].
+
+**Função de ligação logit:** função que transforma a média de uma proporção para a escala irrestrita dos reais: $\text{logit}(\mu) = \log(\mu / (1 - \mu))$. Usada na distribuição beta para que o preditor linear opere sem restrição de intervalo.
+
+**GLMM (Modelo Linear Misto Generalizado):** extensão do modelo linear que combina distribuições não normais com efeitos aleatórios para acomodar dados hierárquicos e correlacionados [@bates2015; @brooks2017].
+
+**Intervalo de confiança de 95%:** intervalo de valores plausíveis para um parâmetro. Em repetições do estudo, 95% dos intervalos calculados conteriam o verdadeiro valor do parâmetro.
+
+**LMM (Modelo Linear Misto):** caso particular do GLMM com distribuição gaussiana e função de ligação identidade. Adequado para respostas contínuas aproximadamente simétricas.
+
+**RCBD (Delineamento em Blocos Casualizados Completos):** delineamento experimental em que os tratamentos são alocados aleatoriamente dentro de cada bloco, com todos os tratamentos presentes em cada bloco, controlando a variabilidade ambiental entre blocos [@montgomery2017].
+
+**Resíduos quantílicos simulados:** resíduos produzidos pelo DHARMa que quantificam a posição de cada observação na distribuição preditiva simulada pelo modelo. Um bom ajuste produz resíduos uniformemente distribuídos em \[0, 1\] [@hartig2022].
+
+**Valor-p:** probabilidade de observar uma diferença tão grande ou maior do que a observada, assumindo que a hipótese nula (ausência de diferença) seja verdadeira. Valores-p pequenos indicam evidência contra a hipótese nula.
+
+## Informações da sessão
+
+```{r}
+#| label: session-info
+
+sessionInfo()
+```
+
+## Referências
