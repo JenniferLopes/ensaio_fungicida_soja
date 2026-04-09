@@ -16,7 +16,9 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-RUN Rscript -e "install.packages(c( \
+RUN Rscript -e " \
+  options(repos = c(CRAN = 'https://packagemanager.posit.co/cran/__linux__/jammy/latest')); \
+  install.packages(c( \
     'glmmTMB', \
     'DHARMa', \
     'emmeans', \
@@ -25,7 +27,7 @@ RUN Rscript -e "install.packages(c( \
     'gt', \
     'DT', \
     'renv' \
-  ), repos = 'https://cloud.r-project.org', Ncpus = 4)"
+  ), Ncpus = 4)"
 
 WORKDIR /project
 

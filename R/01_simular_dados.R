@@ -21,7 +21,6 @@ library(multcomp)
 library(broom.mixed)
 library(gt)
 library(DT)
-library(quarto)
 
 set.seed(2024)
 
