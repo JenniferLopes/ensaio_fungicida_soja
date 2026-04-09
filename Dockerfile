@@ -24,7 +24,6 @@ RUN Rscript -e "install.packages(c( \
     'broom.mixed', \
     'gt', \
     'DT', \
-    'quarto', \
     'renv' \
   ), repos = 'https://cloud.r-project.org', Ncpus = 4)"
 
