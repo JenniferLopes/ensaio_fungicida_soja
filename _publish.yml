@@ -1,0 +1,4 @@
+- source: relatorio.qmd
+  quarto-pub:
+    - id: f7b1d1f9-7641-4da8-8333-12aa55b99dfd
+      url: https://jenniferlopes.quarto.pub/relatorio-modelagem-glmm
