@@ -40,6 +40,8 @@ RUN Rscript R/01_simular_dados.R && \
     Rscript R/03_eda.R           && \
     Rscript R/04_analise_glmm.R
 
-RUN quarto render report/relatorio.qmd --output-dir output/
+RUN quarto render report/relatorio.qmd \
+    --output-dir output/ \
+    --execute-dir /project
 
 CMD ["bash"]
